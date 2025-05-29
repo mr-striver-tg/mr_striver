@@ -1,6 +1,9 @@
 import os
 import logging
 import re
+import threading
+from http.server import SimpleHTTPRequestHandler
+from socketserver import TCPServer
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
     ApplicationBuilder,
@@ -11,17 +14,17 @@ from telegram.ext import (
     ContextTypes,
 )
 
-# Configure logging
+# Logging setup
 logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
     level=logging.INFO
 )
 logger = logging.getLogger(__name__)
 
-# Dictionary to track user modes
+# User mode tracker
 user_mode = {}
 
-# /start command handler
+# Start command handler
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     keyboard = [
         [InlineKeyboardButton("Standard Quiz", callback_data='standard')],
@@ -29,7 +32,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     ]
     await update.message.reply_text("Choose a quiz mode:", reply_markup=InlineKeyboardMarkup(keyboard))
 
-# Callback query handler for mode selection
+# Button handler for quiz mode
 async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
@@ -38,7 +41,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     mode_text = "🟢 Anonymous mode ON." if user_mode[user_id] else "🔵 Standard mode ON."
     await query.edit_message_text(f"{mode_text}\nNow send your question(s).")
 
-# Message handler to process quiz submissions
+# Message handler for quiz input
 async def handle_quiz_submission(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.message.from_user.id
     is_anonymous = user_mode.get(user_id, False)
@@ -47,7 +50,6 @@ async def handle_quiz_submission(update: Update, context: ContextTypes.DEFAULT_T
     if not text or '✅' not in text or 'Ex:' not in text:
         return
 
-    # Regular expression to extract quiz blocks
     quiz_blocks = re.findall(
         r"(.*?(?:\n.*?){4,5})\s*Ex:\s*(.+?)(?=\n(?:\n|.*?Ex:)|$)",
         text.strip(),
@@ -83,7 +85,6 @@ async def handle_quiz_submission(update: Update, context: ContextTypes.DEFAULT_T
         await update.message.reply_text("❌ Couldn’t parse any valid quiz. Check ✅ and Ex: format.")
         return
 
-    # Send each parsed quiz as a separate poll and save to quizzes_log.txt
     for quiz in parsed_quizzes:
         await context.bot.send_poll(
             chat_id=update.message.chat_id,
@@ -95,7 +96,6 @@ async def handle_quiz_submission(update: Update, context: ContextTypes.DEFAULT_T
             is_anonymous=is_anonymous
         )
 
-        # Save quiz to quizzes_log.txt
         with open("quizzes_log.txt", "a", encoding="utf-8") as f:
             f.write(f"Q: {quiz['question']}\n")
             for idx, option in enumerate(quiz["options"]):
@@ -106,22 +106,7 @@ async def handle_quiz_submission(update: Update, context: ContextTypes.DEFAULT_T
             f.write(f"👤 User: @{update.message.from_user.username or 'unknown'}\n")
             f.write("-" * 50 + "\n")
 
-# Main function to start the bot
-def main():
-    token = os.getenv("BOT_TOKEN")
-    if not token:
-        raise ValueError("BOT_TOKEN environment variable not set")
-
-    app = ApplicationBuilder().token(token).build()
-
-    app.add_handler(CommandHandler("start", start))
-    app.add_handler(CallbackQueryHandler(button_handler))
-    app.add_handler(MessageHandler(filters.TEXT & (~filters.COMMAND), handle_quiz_submission))
-import threading
-from http.server import SimpleHTTPRequestHandler
-from socketserver import TCPServer
-
-# Start dummy web server FIRST
+# Start dummy HTTP server for Koyeb health check
 def run_dummy_server():
     PORT = 8000
     Handler = SimpleHTTPRequestHandler
@@ -131,7 +116,22 @@ def run_dummy_server():
 
 threading.Thread(target=run_dummy_server, daemon=True).start()
 
-# THEN start your Telegram bot
-if __name__ == "__main__":
+# Bot setup
+def main():
+    token = os.getenv("BOT_TOKEN")
+    if not token:
+        raise ValueError("BOT_TOKEN environment variable not set")
+
+    global application
+    application = ApplicationBuilder().token(token).build()
+
+    application.add_handler(CommandHandler("start", start))
+    application.add_handler(CallbackQueryHandler(button_handler))
+    application.add_handler(MessageHandler(filters.TEXT & (~filters.COMMAND), handle_quiz_submission))
+
     print("🤖 Bot is running...")
     application.run_polling()
+
+# Start everything
+if __name__ == "__main__":
+    main()
