@@ -123,3 +123,15 @@ def main():
 
 if __name__ == "__main__":
     main()
+import threading
+from http.server import SimpleHTTPRequestHandler
+from socketserver import TCPServer
+
+def run_dummy_server():
+    PORT = 8000
+    Handler = SimpleHTTPRequestHandler
+    with TCPServer(("", PORT), Handler) as httpd:
+        print(f"Dummy server running on port {PORT}")
+        httpd.serve_forever()
+
+threading.Thread(target=run_dummy_server, daemon=True).start()
