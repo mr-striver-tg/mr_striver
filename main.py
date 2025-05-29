@@ -117,16 +117,11 @@ def main():
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CallbackQueryHandler(button_handler))
     app.add_handler(MessageHandler(filters.TEXT & (~filters.COMMAND), handle_quiz_submission))
-
-    print("🤖 Bot is running...")
-    app.run_polling()
-
-if __name__ == "__main__":
-    main()
 import threading
 from http.server import SimpleHTTPRequestHandler
 from socketserver import TCPServer
 
+# Start dummy web server FIRST
 def run_dummy_server():
     PORT = 8000
     Handler = SimpleHTTPRequestHandler
@@ -135,3 +130,8 @@ def run_dummy_server():
         httpd.serve_forever()
 
 threading.Thread(target=run_dummy_server, daemon=True).start()
+
+# THEN start your Telegram bot
+if __name__ == "__main__":
+    print("🤖 Bot is running...")
+    application.run_polling()
