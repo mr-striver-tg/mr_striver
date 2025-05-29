@@ -14,39 +14,107 @@ from telegram.ext import (
     ContextTypes,
 )
 
-# Logging setup
+# Configure logging
 logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
     level=logging.INFO
 )
 logger = logging.getLogger(__name__)
 
-# User mode tracker
-user_mode = {}
+user_mode = {}      # Tracks if user is in anonymous or standard mode
+user_states = {}    # For lengthy quiz multi-step tracking
 
-# Start command handler
+# Start command
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     keyboard = [
         [InlineKeyboardButton("Standard Quiz", callback_data='standard')],
         [InlineKeyboardButton("Anonymous Quiz", callback_data='anonymous')],
+        [InlineKeyboardButton("Lengthy Quiz", callback_data='lengthy')]
     ]
     await update.message.reply_text("Choose a quiz mode:", reply_markup=InlineKeyboardMarkup(keyboard))
 
-# Button handler for quiz mode
+# Mode selection
 async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
     user_id = query.from_user.id
-    user_mode[user_id] = query.data == "anonymous"
+    mode = query.data
+
+    if mode == "lengthy":
+        user_states[user_id] = {"step": "question", "anonymous": False}
+        await query.edit_message_text("📝 Lengthy Quiz mode ON.\nStep 1: Send your quiz question.")
+        return
+
+    user_mode[user_id] = (mode == "anonymous")
     mode_text = "🟢 Anonymous mode ON." if user_mode[user_id] else "🔵 Standard mode ON."
     await query.edit_message_text(f"{mode_text}\nNow send your question(s).")
 
-# Message handler for quiz input
+# Handle quiz input
 async def handle_quiz_submission(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.message.from_user.id
-    is_anonymous = user_mode.get(user_id, False)
-    text = update.message.text
+    text = update.message.text.strip()
 
+    # Lengthy Quiz mode flow
+    if user_id in user_states:
+        state = user_states[user_id]
+
+        if state["step"] == "question":
+            state["question"] = text
+            state["step"] = "options"
+            await update.message.reply_text("✅ Question saved.\nStep 2: Send options (✅ for correct one) and explanation in this format:\n\nOption A\nOption B ✅\nOption C\nOption D\nEx: Your explanation here.")
+            return
+
+        elif state["step"] == "options":
+            lines = [line.strip("️ ").strip() for line in text.split("\n") if line.strip()]
+            explanation_line = next((line for line in lines if line.startswith("Ex:")), None)
+
+            if not explanation_line:
+                await update.message.reply_text("❌ Please include explanation starting with 'Ex:' in the last line.")
+                return
+
+            explanation = explanation_line[3:].strip()
+            options = []
+            correct_idx = None
+
+            for idx, line in enumerate(lines):
+                if line.startswith("Ex:"):
+                    break
+                if "✅" in line:
+                    correct_idx = idx
+                    line = line.replace("✅", "").strip()
+                options.append(line)
+
+            if len(options) < 2 or correct_idx is None:
+                await update.message.reply_text("❌ At least 2 options required and one must be marked with ✅.")
+                return
+
+            # Finalize and send quiz
+            await context.bot.send_poll(
+                chat_id=update.message.chat_id,
+                question=state["question"],
+                options=options,
+                type="quiz",
+                correct_option_id=correct_idx,
+                explanation=explanation,
+                is_anonymous=state["anonymous"]
+            )
+
+            # Save to log
+            with open("quizzes_log.txt", "a", encoding="utf-8") as f:
+                f.write(f"Q: {state['question']}\n")
+                for i, opt in enumerate(options):
+                    f.write(f"{'✅ ' if i == correct_idx else '   '}{opt}\n")
+                f.write(f"💡 Explanation: {explanation}\n")
+                f.write(f"📘 Mode: {'Anonymous' if state['anonymous'] else 'Standard'}\n")
+                f.write(f"👤 User: @{update.message.from_user.username or 'unknown'}\n")
+                f.write("-" * 50 + "\n")
+
+            await update.message.reply_text("🎉 Quiz created successfully.")
+            user_states.pop(user_id)
+            return
+
+    # Standard/Anonymous inline quiz submission
+    is_anonymous = user_mode.get(user_id, False)
     if not text or '✅' not in text or 'Ex:' not in text:
         return
 
@@ -62,17 +130,14 @@ async def handle_quiz_submission(update: Update, context: ContextTypes.DEFAULT_T
         lines = [line.strip("️ ").strip() for line in block.strip().split("\n") if line.strip()]
         if len(lines) < 5:
             continue
-
         question = lines[0]
         options = []
         correct_option_id = None
-
         for idx, option in enumerate(lines[1:]):
             if "✅" in option:
                 correct_option_id = idx
                 option = option.replace("✅", "").strip()
             options.append(option)
-
         if correct_option_id is not None:
             parsed_quizzes.append({
                 "question": question,
@@ -98,15 +163,15 @@ async def handle_quiz_submission(update: Update, context: ContextTypes.DEFAULT_T
 
         with open("quizzes_log.txt", "a", encoding="utf-8") as f:
             f.write(f"Q: {quiz['question']}\n")
-            for idx, option in enumerate(quiz["options"]):
-                prefix = "✅ " if idx == quiz["correct_option_id"] else "   "
-                f.write(f"{prefix}{option}\n")
+            for i, opt in enumerate(quiz["options"]):
+                prefix = "✅ " if i == quiz["correct_option_id"] else "   "
+                f.write(f"{prefix}{opt}\n")
             f.write(f"💡 Explanation: {quiz['explanation']}\n")
             f.write(f"📘 Mode: {'Anonymous' if is_anonymous else 'Standard'}\n")
             f.write(f"👤 User: @{update.message.from_user.username or 'unknown'}\n")
             f.write("-" * 50 + "\n")
 
-# Start dummy HTTP server for Koyeb health check
+# Run dummy web server to keep Railway alive
 def run_dummy_server():
     PORT = 8000
     Handler = SimpleHTTPRequestHandler
@@ -116,22 +181,17 @@ def run_dummy_server():
 
 threading.Thread(target=run_dummy_server, daemon=True).start()
 
-# Bot setup
+# Start bot
 def main():
     token = os.getenv("BOT_TOKEN")
     if not token:
         raise ValueError("BOT_TOKEN environment variable not set")
-
-    global application
     application = ApplicationBuilder().token(token).build()
-
     application.add_handler(CommandHandler("start", start))
     application.add_handler(CallbackQueryHandler(button_handler))
     application.add_handler(MessageHandler(filters.TEXT & (~filters.COMMAND), handle_quiz_submission))
-
     print("🤖 Bot is running...")
     application.run_polling()
 
-# Start everything
 if __name__ == "__main__":
     main()
