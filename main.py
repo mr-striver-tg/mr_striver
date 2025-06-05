@@ -4,7 +4,7 @@ import re
 import threading
 from http.server import SimpleHTTPRequestHandler
 from socketserver import TCPServer
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, InputMediaPhoto
 from telegram.ext import (
     ApplicationBuilder,
     CommandHandler,
@@ -14,15 +14,15 @@ from telegram.ext import (
     ContextTypes,
 )
 
-# Configure logging
 logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
     level=logging.INFO
 )
 logger = logging.getLogger(__name__)
 
-user_mode = {}      # Tracks if user is in anonymous or standard mode
-user_states = {}    # For lengthy quiz multi-step tracking
+user_mode = {}
+user_states = {}
+image_cache = {}  # Temporary store for image file_id
 
 # Start command
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -33,7 +33,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     ]
     await update.message.reply_text("Choose a quiz mode:", reply_markup=InlineKeyboardMarkup(keyboard))
 
-# Mode selection
+# Button handler
 async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
@@ -42,30 +42,34 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if mode == "lengthy":
         user_states[user_id] = {"step": "question", "anonymous": False}
-        await query.edit_message_text("📝 Lengthy Quiz mode ON.\nStep 1: Send your quiz question.")
+        await query.edit_message_text("📝 Lengthy Quiz mode ON.\nStep 1: Send your quiz question (text or image with caption).")
         return
 
     user_mode[user_id] = (mode == "anonymous")
     mode_text = "🟢 Anonymous mode ON." if user_mode[user_id] else "🔵 Standard mode ON."
-    await query.edit_message_text(f"{mode_text}\nNow send your question(s).")
+    await query.edit_message_text(f"{mode_text}\nNow send your question(s). Image with caption supported.")
 
-# Handle quiz input
+# Message handler
 async def handle_quiz_submission(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.message.from_user.id
-    text = update.message.text.strip()
 
-    # Lengthy Quiz mode flow
+    # Lengthy mode flow
     if user_id in user_states:
         state = user_states[user_id]
 
         if state["step"] == "question":
-            state["question"] = text
+            if update.message.photo:
+                photo = update.message.photo[-1].file_id
+                caption = update.message.caption or "Untitled Quiz"
+                state.update({"image": photo, "question": caption})
+            else:
+                state.update({"question": update.message.text.strip(), "image": None})
             state["step"] = "options"
             await update.message.reply_text("✅ Question saved.\nStep 2: Send options (✅ for correct one) and explanation in this format:\n\nOption A\nOption B ✅\nOption C\nOption D\nEx: Your explanation here.")
             return
 
         elif state["step"] == "options":
-            lines = [line.strip("️ ").strip() for line in text.split("\n") if line.strip()]
+            lines = [line.strip("️ ").strip() for line in update.message.text.strip().split("\n") if line.strip()]
             explanation_line = next((line for line in lines if line.startswith("Ex:")), None)
 
             if not explanation_line:
@@ -88,7 +92,8 @@ async def handle_quiz_submission(update: Update, context: ContextTypes.DEFAULT_T
                 await update.message.reply_text("❌ At least 2 options required and one must be marked with ✅.")
                 return
 
-            # Finalize and send quiz
+            if state.get("image"):
+                await context.bot.send_photo(chat_id=update.message.chat_id, photo=state["image"], caption=state["question"])
             await context.bot.send_poll(
                 chat_id=update.message.chat_id,
                 question=state["question"],
@@ -99,22 +104,65 @@ async def handle_quiz_submission(update: Update, context: ContextTypes.DEFAULT_T
                 is_anonymous=state["anonymous"]
             )
 
-            # Save to log
-            with open("quizzes_log.txt", "a", encoding="utf-8") as f:
-                f.write(f"Q: {state['question']}\n")
-                for i, opt in enumerate(options):
-                    f.write(f"{'✅ ' if i == correct_idx else '   '}{opt}\n")
-                f.write(f"💡 Explanation: {explanation}\n")
-                f.write(f"📘 Mode: {'Anonymous' if state['anonymous'] else 'Standard'}\n")
-                f.write(f"👤 User: @{update.message.from_user.username or 'unknown'}\n")
-                f.write("-" * 50 + "\n")
-
-            await update.message.reply_text("🎉 Quiz created successfully.")
             user_states.pop(user_id)
+            await update.message.reply_text("🎉 Quiz created successfully.")
             return
 
-    # Standard/Anonymous inline quiz submission
+    # Inline Standard/Anonymous flow
     is_anonymous = user_mode.get(user_id, False)
+
+    if update.message.photo:
+        file_id = update.message.photo[-1].file_id
+        caption = update.message.caption or "Untitled Quiz"
+        image_cache[user_id] = {"file_id": file_id, "caption": caption}
+        await update.message.reply_text("📸 Image quiz received. Now send options (✅) and explanation (Ex:) in text.")
+        return
+
+    if user_id in image_cache:
+        cache = image_cache.pop(user_id)
+        image_id = cache["file_id"]
+        question = cache["caption"]
+        text = update.message.text.strip()
+
+        if '✅' not in text or 'Ex:' not in text:
+            await update.message.reply_text("❌ Format error. Must include ✅ and Ex:")
+            return
+
+        lines = [line.strip("️ ").strip() for line in text.strip().split("\n") if line.strip()]
+        explanation_line = next((line for line in lines if line.startswith("Ex:")), None)
+        if not explanation_line:
+            await update.message.reply_text("❌ Missing explanation (Ex:).")
+            return
+
+        explanation = explanation_line[3:].strip()
+        options = []
+        correct_idx = None
+        for idx, line in enumerate(lines):
+            if line.startswith("Ex:"):
+                break
+            if "✅" in line:
+                correct_idx = idx
+                line = line.replace("✅", "").strip()
+            options.append(line)
+
+        if correct_idx is None or len(options) < 2:
+            await update.message.reply_text("❌ Must include at least 2 options with one ✅ marked.")
+            return
+
+        await context.bot.send_photo(chat_id=update.message.chat_id, photo=image_id, caption=question)
+        await context.bot.send_poll(
+            chat_id=update.message.chat_id,
+            question=question,
+            options=options,
+            type="quiz",
+            correct_option_id=correct_idx,
+            explanation=explanation,
+            is_anonymous=is_anonymous
+        )
+        return
+
+    # Text-based inline quiz parsing (no image)
+    text = update.message.text.strip()
     if not text or '✅' not in text or 'Ex:' not in text:
         return
 
@@ -161,17 +209,7 @@ async def handle_quiz_submission(update: Update, context: ContextTypes.DEFAULT_T
             is_anonymous=is_anonymous
         )
 
-        with open("quizzes_log.txt", "a", encoding="utf-8") as f:
-            f.write(f"Q: {quiz['question']}\n")
-            for i, opt in enumerate(quiz["options"]):
-                prefix = "✅ " if i == quiz["correct_option_id"] else "   "
-                f.write(f"{prefix}{opt}\n")
-            f.write(f"💡 Explanation: {quiz['explanation']}\n")
-            f.write(f"📘 Mode: {'Anonymous' if is_anonymous else 'Standard'}\n")
-            f.write(f"👤 User: @{update.message.from_user.username or 'unknown'}\n")
-            f.write("-" * 50 + "\n")
-
-# Run dummy web server to keep Railway alive
+# Dummy server to keep Railway or Koyeb alive
 def run_dummy_server():
     PORT = 8000
     Handler = SimpleHTTPRequestHandler
@@ -181,7 +219,7 @@ def run_dummy_server():
 
 threading.Thread(target=run_dummy_server, daemon=True).start()
 
-# Start bot
+# Bot startup
 def main():
     token = os.getenv("BOT_TOKEN")
     if not token:
@@ -189,7 +227,7 @@ def main():
     application = ApplicationBuilder().token(token).build()
     application.add_handler(CommandHandler("start", start))
     application.add_handler(CallbackQueryHandler(button_handler))
-    application.add_handler(MessageHandler(filters.TEXT & (~filters.COMMAND), handle_quiz_submission))
+    application.add_handler(MessageHandler(filters.TEXT | filters.PHOTO, handle_quiz_submission))
     print("🤖 Bot is running...")
     application.run_polling()
 
