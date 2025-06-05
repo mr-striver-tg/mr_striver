@@ -19,9 +19,10 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-user_mode = {}      # Tracks standard or anonymous
-user_states = {}    # Tracks step and data for lengthy quiz
-user_images = {}    # Tracks user image for quiz (optional)
+user_mode = {}       # Tracks standard or anonymous
+user_states = {}     # Tracks step and data for lengthy quiz
+user_images = {}     # Tracks user image for quiz (optional)
+user_image_queue = {}  # For storing temporary images before question in standard/anonymous
 
 # /start command
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -38,6 +39,7 @@ async def stop(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_mode.pop(user_id, None)
     user_states.pop(user_id, None)
     user_images.pop(user_id, None)
+    user_image_queue.pop(user_id, None)
     await update.message.reply_text("🛑 Quiz creation cancelled. You can type /start to begin again.")
 
 # Handle mode buttons
@@ -54,20 +56,23 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     user_mode[user_id] = (mode == "anonymous")
     await query.edit_message_text(
-        f"{'🟢 Anonymous' if user_mode[user_id] else '🔵 Standard'} mode ON.\nNow send your question(s) with ✅ and Ex:."
+        f"{'🟢 Anonymous' if user_mode[user_id] else '🔵 Standard'} mode ON.\nNow send your question(s) with ✅ and Ex:.\nYou can optionally send an image first."
     )
 
 # Handle photo input
 async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.message.from_user.id
-    if user_id not in user_states:
-        await update.message.reply_text("📷 Image received, but please select 'Lengthy Quiz' mode first using /start.")
-        return
-
     photo = update.message.photo[-1]  # Highest resolution
     file_id = photo.file_id
-    user_images[user_id] = file_id
-    await update.message.reply_text("📸 Image saved for your quiz question. Now continue with the quiz steps.")
+
+    if user_id in user_states:
+        user_images[user_id] = file_id
+        await update.message.reply_text("📸 Image saved for your quiz question. Now continue with the quiz steps.")
+    elif user_id in user_mode:
+        user_image_queue[user_id] = file_id
+        await update.message.reply_text("📸 Image saved. Now send your quiz in text format.")
+    else:
+        await update.message.reply_text("📷 Image received, but please start quiz creation using /start.")
 
 # Handle quiz creation
 async def handle_quiz_submission(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -111,11 +116,9 @@ async def handle_quiz_submission(update: Update, context: ContextTypes.DEFAULT_T
 
             image = user_images.get(user_id)
 
-            # Send image if available
             if image:
                 await context.bot.send_photo(chat_id=update.message.chat_id, photo=image, caption="🖼 Related to the quiz")
 
-            # Send the quiz
             await context.bot.send_poll(
                 chat_id=update.message.chat_id,
                 question=state["question"],
@@ -126,7 +129,6 @@ async def handle_quiz_submission(update: Update, context: ContextTypes.DEFAULT_T
                 is_anonymous=state["anonymous"]
             )
 
-            # Log
             with open("quizzes_log.txt", "a", encoding="utf-8") as f:
                 f.write(f"Q: {state['question']}\n")
                 for i, opt in enumerate(options):
@@ -153,7 +155,6 @@ async def handle_quiz_submission(update: Update, context: ContextTypes.DEFAULT_T
     )
 
     parsed_quizzes = []
-
     for block, explanation in quiz_blocks:
         lines = [line.strip("️ ").strip() for line in block.strip().split("\n") if line.strip()]
         if len(lines) < 5:
@@ -178,7 +179,11 @@ async def handle_quiz_submission(update: Update, context: ContextTypes.DEFAULT_T
         await update.message.reply_text("❌ Couldn’t parse quiz. Check ✅ and Ex: format.")
         return
 
+    image = user_image_queue.get(user_id)
     for quiz in parsed_quizzes:
+        if image:
+            await context.bot.send_photo(chat_id=update.message.chat_id, photo=image, caption="🖼 Related to the quiz")
+
         await context.bot.send_poll(
             chat_id=update.message.chat_id,
             question=quiz["question"],
@@ -198,6 +203,8 @@ async def handle_quiz_submission(update: Update, context: ContextTypes.DEFAULT_T
             f.write(f"📘 Mode: {'Anonymous' if is_anonymous else 'Standard'}\n")
             f.write(f"👤 User: @{update.message.from_user.username or 'unknown'}\n")
             f.write("-" * 50 + "\n")
+
+    user_image_queue.pop(user_id, None)
 
 # Run dummy server
 def run_dummy_server():
